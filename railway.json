@@ -1,0 +1,9 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "watchPatterns": ["/tg_coin_bot/**"]
+  },
+  "deploy": {
+    "startCommand": "cd tg_coin_bot && python main.py"
+  }
+}

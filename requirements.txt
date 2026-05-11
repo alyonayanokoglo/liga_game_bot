@@ -1,0 +1,1 @@
+-r tg_coin_bot/requirements.txt
