@@ -1,0 +1,5 @@
+{
+  "venvPath": "tg_coin_bot",
+  "venv": "venv",
+  "include": ["tg_coin_bot"]
+}
