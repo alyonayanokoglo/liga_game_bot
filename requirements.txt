@@ -1,1 +1,3 @@
--r tg_coin_bot/requirements.txt
+aiogram
+aiosqlite
+python-dotenv
