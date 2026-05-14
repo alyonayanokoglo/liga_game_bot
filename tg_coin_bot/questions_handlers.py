@@ -3,89 +3,87 @@ from typing import Optional
 
 from aiogram import Dispatcher, F
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardMarkup,
+)
+from client_nav import CLIENT_NAV_OPEN_MIC
+from quiz_handlers import QUIZ_INTRO_MEGAPHONE_CUSTOM_EMOJI_ID
 
-MainReplyMenu = Callable[[], ReplyKeyboardMarkup]
 GetUserByTelegramId = Callable[[int], Awaitable[Optional[dict]]]
-GetQuestionsCountForUser = Callable[[int], Awaitable[int]]
-CreateQuestion = Callable[[int, str], Awaitable[None]]
+MainNavMarkup = Callable[[], ReplyKeyboardMarkup]
+
+OPEN_MIC_FORM_BUTTON = "Задать вопрос"
+
+OPEN_MIC_PROMPT_HTML = (
+    f"<b>Стендап у кулера с Максимом Лутчаком</b> "
+    f'<tg-emoji emoji-id="{QUIZ_INTRO_MEGAPHONE_CUSTOM_EMOJI_ID}">📣</tg-emoji>\n\n'
+    "Открытый микрофон про карьеру, работу и всё, что обычно обсуждают у кулера.\n\n"
+    "Хочешь задать вопрос? Отправь его через форму — так он точно дойдёт до модераторов."
+)
 
 
-class OpenMicQuestion(StatesGroup):
-    waiting_for_text = State()
+def _open_mic_form_inline_kb(open_mic_form_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=OPEN_MIC_FORM_BUTTON,
+                    url=open_mic_form_url,
+                ),
+            ],
+        ]
+    )
+
+
+async def answer_open_mic_prompt(
+    message: Message,
+    *,
+    get_user_by_telegram_id: GetUserByTelegramId,
+    main_nav_markup: MainNavMarkup,
+    open_mic_form_url: str,
+    from_user_id: Optional[int] = None,
+) -> None:
+    uid = from_user_id or (message.from_user.id if message.from_user else None)
+    if uid is None:
+        return
+    user = await get_user_by_telegram_id(uid)
+    if not user:
+        await message.answer("Сначала нажми /start и зарегистрируйся.")
+        return
+
+    if not open_mic_form_url:
+        await message.answer(
+            "Форма для вопросов к открытому микрофону пока не подключена. "
+            "Подойди к организатору мероприятия.",
+            reply_markup=main_nav_markup(),
+        )
+        return
+
+    await message.answer(
+        OPEN_MIC_PROMPT_HTML,
+        parse_mode="HTML",
+        reply_markup=_open_mic_form_inline_kb(open_mic_form_url),
+    )
 
 
 def register_questions_handlers(
     dp: Dispatcher,
-    main_reply_menu: MainReplyMenu,
+    main_nav_markup: MainNavMarkup,
     get_user_by_telegram_id: GetUserByTelegramId,
-    get_questions_count_for_user: GetQuestionsCountForUser,
-    create_question: CreateQuestion,
+    open_mic_form_url: str,
 ) -> None:
-    @dp.message(F.text == "🎤 Задать вопрос (открытый микрофон)")
-    async def open_mic_question_start(message: Message, state: FSMContext) -> None:
-        from_user = message.from_user
-        if from_user is None:
+    @dp.message(F.text == CLIENT_NAV_OPEN_MIC)
+    async def open_mic_nav(message: Message, state: FSMContext) -> None:
+        if message.from_user is None:
             return
-        user = await get_user_by_telegram_id(from_user.id)
-        if not user:
-            await message.answer("Сначала нажми /start и зарегистрируйся.")
-            return
-
-        asked = await get_questions_count_for_user(user["id"])
-        if asked >= 3:
-            await message.answer(
-                "Ты уже задал(а) максимум 3 вопроса для открытого микрофона.\n\n"
-                "Если нужно — подойди к организатору.",
-                reply_markup=main_reply_menu(),
-            )
-            return
-
-        await state.set_state(OpenMicQuestion.waiting_for_text)
-        await message.answer(
-            "Напиши свой вопрос одним сообщением.\n\n"
-            "Лимит: 3 вопроса на человека.\n"
-            "Чтобы отменить — нажми «Меню».",
-            reply_markup=main_reply_menu(),
-        )
-
-    @dp.message(OpenMicQuestion.waiting_for_text)
-    async def open_mic_question_text(message: Message, state: FSMContext) -> None:
-        from_user = message.from_user
-        if from_user is None:
-            return
-        user = await get_user_by_telegram_id(from_user.id)
-        if not user:
-            await message.answer("Сначала нажми /start и зарегистрируйся.")
-            await state.clear()
-            return
-
-        text = (message.text or "").strip()
-        if not text:
-            await message.answer("Напиши вопрос текстом одним сообщением.")
-            return
-
-        if len(text) > 1000:
-            await message.answer("Слишком длинно. Сократи, пожалуйста, до 1000 символов.")
-            return
-
-        asked = await get_questions_count_for_user(user["id"])
-        if asked >= 3:
-            await state.clear()
-            await message.answer(
-                "Похоже, лимит 3 вопроса уже исчерпан.",
-                reply_markup=main_reply_menu(),
-            )
-            return
-
-        await create_question(user["id"], text)
         await state.clear()
-
-        remaining = max(0, 3 - (asked + 1))
-        await message.answer(
-            "✅ Вопрос записан! Спасибо.\n\n"
-            f"Осталось вопросов: {remaining} из 3.",
-            reply_markup=main_reply_menu(),
+        await answer_open_mic_prompt(
+            message,
+            get_user_by_telegram_id=get_user_by_telegram_id,
+            main_nav_markup=main_nav_markup,
+            open_mic_form_url=open_mic_form_url,
+            from_user_id=message.from_user.id,
         )
-

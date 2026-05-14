@@ -1,4 +1,5 @@
 import asyncio
+import html
 import os
 import random
 import re
@@ -18,9 +19,15 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+)
+from client_nav import (
+    CLIENT_NAV_BALANCE,
+    CLIENT_NAV_DEMO_PROGRAM,
+    CLIENT_NAV_OFFICE_MAP,
+    CLIENT_NAV_SPEND,
+    client_main_nav_reply_keyboard,
 )
 from dotenv import load_dotenv
 from db_backend import (
@@ -44,12 +51,26 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 CAREER_DEMO_PHOTO_PATH = BASE_DIR / "img" / "1920х1080 (1) (1).png"
 BALANCE_PHOTO_PATH = BASE_DIR / "img" / "1200Х600 (1) (1).png"
+OFFICE_MAP_PHOTO_PATH = BASE_DIR / "img" / "lako.jpg"
+
+# Кастомный 🎁 в подсказке про обмен кармы на мерч в магазине.
+MERCH_SHOP_GIFT_CUSTOM_EMOJI_ID = "5411490391587324162"
+MERCH_SHOP_GIFT_HTML = (
+    f'<tg-emoji emoji-id="{MERCH_SHOP_GIFT_CUSTOM_EMOJI_ID}">🎁</tg-emoji>'
+)
+
+BALANCE_FIRE_CUSTOM_EMOJI_ID = "5413389192333915526"
+BALANCE_FIRE_HTML = f'<tg-emoji emoji-id="{BALANCE_FIRE_CUSTOM_EMOJI_ID}">🔥</tg-emoji>'
 
 ADMIN_IDS = {
     int(admin_id.strip())
     for admin_id in os.getenv("ADMIN_IDS", "").split(",")
     if admin_id.strip()
 }
+
+# Ссылка на форму вопросов к открытому микрофону (Яндекс.Формы, Google Forms и т.п.).
+_DEFAULT_OPEN_MIC_FORM = "https://forms.yandex.ru/u/69f9861f90fa7b8ca0a4feee/"
+OPEN_MIC_FORM_URL = os.getenv("OPEN_MIC_FORM_URL", _DEFAULT_OPEN_MIC_FORM).strip()
 
 ACTIVITY_WELCOME = "Регистрация: приветственное"
 ACTIVITY_QUIZ_REWARD = "Квиз о банке"
@@ -58,6 +79,7 @@ ACTIVITY_QUIZ_REWARD = "Квиз о банке"
 # до 4 раз на человека (см. миграцию transactions без UNIQUE по паре активность-пользователь).
 ACTIVITY_ADMIN_LECTURE_FALLBACK = "Лекция (админ)"
 ACTIVITY_ADMIN_MANUAL = "Ручное начисление (админ)"
+ACTIVITY_VK_COMMUNITY = "Подписка на VK‑сообщество"
 
 
 def _transactions_type_column() -> str:
@@ -76,7 +98,7 @@ def _activities_seed_rows() -> list[tuple[str, int, int, int]]:
         ("Финансовые активы", 200, 1, 0),
         ("Финансы судьбы", 200, 1, 0),
         ("Подписка на Telegram‑канал", 100, 1, 0),
-        ("Подписка на VK‑сообщество", 100, 1, 0),
+        (ACTIVITY_VK_COMMUNITY, 100, 1, 0),
         (ACTIVITY_QUIZ_REWARD, 10, 20, 0),
         ("Лекция 1", 400, 1, 1),
         ("Лекция 2", 400, 1, 1),
@@ -148,6 +170,40 @@ async def _mysql_init_schema_and_seed(db: Any) -> None:
     )
     await db.execute(
         """
+        CREATE TABLE IF NOT EXISTS quiz_progress (
+            user_id INT UNSIGNED NOT NULL PRIMARY KEY,
+            `order_json` TEXT NOT NULL,
+            pos INT NOT NULL DEFAULT 0,
+            correct_cnt INT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+            CONSTRAINT fk_quiz_progress_user FOREIGN KEY (user_id) REFERENCES users (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quiz_awards (
+            user_id INT UNSIGNED NOT NULL,
+            q_index INT NOT NULL,
+            awarded TINYINT NOT NULL DEFAULT 1,
+            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, q_index),
+            CONSTRAINT fk_quiz_awards_user FOREIGN KEY (user_id) REFERENCES users (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quiz_completion (
+            user_id INT UNSIGNED NOT NULL PRIMARY KEY,
+            completed_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fk_quiz_completion_user FOREIGN KEY (user_id) REFERENCES users (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    await db.execute(
+        """
         CREATE TABLE IF NOT EXISTS karma_debits (
             id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
             user_id INT UNSIGNED NOT NULL,
@@ -158,18 +214,6 @@ async def _mysql_init_schema_and_seed(db: Any) -> None:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """
     )
-    await db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS open_mic_questions (
-            id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-            user_id INT UNSIGNED NOT NULL,
-            text TEXT NOT NULL,
-            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
-            CONSTRAINT fk_open_mic_user FOREIGN KEY (user_id) REFERENCES users (id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """
-    )
-
     activities = _activities_seed_rows()
     for title, points, limit_per_user, is_lecture in activities:
         await db.execute(
@@ -212,50 +256,51 @@ class Registration(StatesGroup):
 
 
 def main_reply_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="Где взять карму"),
-                KeyboardButton(text="Все активности"),
-            ],
-            [
-                KeyboardButton(text="Мой баланс"),
-                KeyboardButton(text="Списать карму"),
-            ],
-            [KeyboardButton(text="Квиз о банке")],
-            [KeyboardButton(text="🎤 Задать вопрос (открытый микрофон)")],
-            [KeyboardButton(text="Меню")],
-        ],
-        resize_keyboard=True,
-    )
+    return client_main_nav_reply_keyboard()
 
 
 def is_admin(telegram_id: int) -> bool:
     return telegram_id in ADMIN_IDS
 
 
-def career_demo_text(name: str) -> str:
+def career_demo_intro_html(name: str) -> str:
+    """Короткое приветствие после регистрации (без расписания)."""
+    safe = html.escape(name)
     return (
-        f"{name}, сейчас начинается демо-версия твоей карьеры в Совкомбанке. "
-        "Что тебя ждёт:\n\n"
+        "Сейчас начинётся демо-версия твоей карьеры.\n\n"
+        f"{safe}, сейчас начинётся демо-версия твоей карьеры в Совкомбанке!\n\n"
+        "Изучай локации, участвуй в активностях и зарабатывай карму, "
+        "которую можно обменять на мерч.\n\n"
+        "Хочешь получить карму прямо сейчас?"
+    )
+
+
+def career_demo_text(name: str) -> str:
+    """Текст после регистрации — только вступление; расписание — по кнопке «Программа демо-дня»."""
+    return career_demo_intro_html(name)
+
+
+def demo_day_program_html() -> str:
+    """Расписание демо дня (только по кнопке «Программа демо-дня»)."""
+    return (
         "<b>Переговорки</b>\n"
-        "• 16:00–20:00 — Карьерные консультации один на один с рекрутером\n\n"
+        "🔹 16:00–20:00 — Карьерные консультации один на один с рекрутером\n\n"
         "<b>Зона интерактивов и комната отдыха</b>\n"
-        "• 16:00–20:00 — Погружение в рабочие процессы. Участвуй в интерактивах, "
+        "🔹 16:00–20:00 — Погружение в рабочие процессы. Участвуй в интерактивах, "
         "чтобы примерить профессии Совкомбанка на себе\n\n"
         "<b>Лекторий</b>\n"
-        "• 17:00–17:30 — Ознакомительная встреча\n"
-        "• 17:30–18:00 — Маршрут перестроен: карьерные «нет», которые приведут вас к работе мечты "
-        "(Ксения Васильева)\n"
-        "• 18:00–18:30 — Как не быть свайпнутым в цифровом мире: боремся за внимание рекрутеров, "
-        "коллег и клиентов (Ольга Кадникова, Ольга Игнатович)\n"
-        "• 18:30–19:00 — Спастись от деградации: инструкция по осознанному обучению в эпоху AI "
-        "(Виктория Свищёва)\n"
-        "• 20:00–21:00 — Открытый микрофон с Максимом Лутчаком\n"
-        "• 21:00–22:00 — Встреча с друллегами у кулера и битва диджеев\n\n"
+        "🔹 17:00–17:30 — Ознакомительная встреча\n"
+        "🔹 17:30–18:15 — Маршрут перестроен: карьерные «нет», которые приведут вас к работе мечты\n"
+        "Ксения Васильева\n"
+        "🔹 18:15–18:45 — Как не быть свайпнутым в цифровом мире: боремся за внимание рекрутеров, "
+        "коллег и клиентов\n"
+        "Ольга Кадникова и Ольга Игнатович\n"
+        "🔹 18:45–19:15 — Спастись от деградации: инструкция по осознанному обучению в эпоху AI\n"
+        "Виктория Свищёва\n"
+        "🔹 20:00–21:00 — Открытый микрофон с Максимом Лутчаком\n"
+        "🔹 21:00–22:00 — Встреча с друллегами у кулера и битва диджеев\n\n"
         "<b>Магазин мерча (товаров)</b>\n"
-        "• 17:30–20:00 — …\n\n"
-        "Хочешь узнать, где и как заработать карму на покупку мерча?"
+        "🔹 17:30–20:00"
     )
 
 
@@ -367,12 +412,24 @@ async def init_db() -> None:
 
         await db.execute(
             """
-            CREATE TABLE IF NOT EXISTS karma_debits (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            CREATE TABLE IF NOT EXISTS quiz_progress (
+                user_id INTEGER PRIMARY KEY,
+                order_json TEXT NOT NULL,
+                pos INTEGER NOT NULL DEFAULT 0,
+                correct_cnt INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quiz_awards (
                 user_id INTEGER NOT NULL,
-                points INTEGER NOT NULL,
-                created_by_admin_tg_id INTEGER NOT NULL,
+                q_index INTEGER NOT NULL,
+                awarded INTEGER NOT NULL DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, q_index),
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
             """
@@ -380,10 +437,21 @@ async def init_db() -> None:
 
         await db.execute(
             """
-            CREATE TABLE IF NOT EXISTS open_mic_questions (
+            CREATE TABLE IF NOT EXISTS quiz_completion (
+                user_id INTEGER PRIMARY KEY,
+                completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS karma_debits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
-                text TEXT NOT NULL,
+                points INTEGER NOT NULL,
+                created_by_admin_tg_id INTEGER NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
@@ -416,27 +484,6 @@ async def init_db() -> None:
             active_titles,
         )
 
-        await db.commit()
-
-
-async def get_open_mic_questions_count_for_user(user_id: int) -> int:
-    async with db_session() as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) AS count FROM open_mic_questions WHERE user_id = ?",
-            (user_id,),
-        )
-        row = await cursor.fetchone()
-        if row is None:
-            return 0
-        return int(row_to_dict(row)["count"])
-
-
-async def create_open_mic_question(user_id: int, text: str) -> None:
-    async with db_session() as db:
-        await db.execute(
-            "INSERT INTO open_mic_questions (user_id, text) VALUES (?, ?)",
-            (user_id, text),
-        )
         await db.commit()
 
 
@@ -491,17 +538,22 @@ async def create_user(
 
 
 async def get_activities_for_admin_accrual() -> list[dict]:
-    """Активности для кнопок начисления в админке: без регистрации, квиза и лекций."""
+    """Активности для кнопок начисления в админке: без регистрации, квиза, лекций, VK и служебной строки ручного начисления."""
     async with db_session() as db:
         cursor = await db.execute(
             """
             SELECT * FROM activities
             WHERE is_active = 1
               AND is_lecture = 0
-              AND title NOT IN (?, ?)
+              AND title NOT IN (?, ?, ?, ?)
             ORDER BY points ASC
             """,
-            (ACTIVITY_WELCOME, ACTIVITY_QUIZ_REWARD),
+            (
+                ACTIVITY_WELCOME,
+                ACTIVITY_QUIZ_REWARD,
+                ACTIVITY_ADMIN_MANUAL,
+                ACTIVITY_VK_COMMUNITY,
+            ),
         )
         rows = await cursor.fetchall()
         return [row_to_dict(row) for row in rows]
@@ -644,7 +696,12 @@ async def add_points(
                 None,
             )
 
-        if activity["title"] in (ACTIVITY_WELCOME, ACTIVITY_QUIZ_REWARD):
+        if activity["title"] in (
+            ACTIVITY_WELCOME,
+            ACTIVITY_QUIZ_REWARD,
+            ACTIVITY_ADMIN_MANUAL,
+            ACTIVITY_VK_COMMUNITY,
+        ):
             return (
                 False,
                 "Через админку нельзя начислять карму за эту активность.",
@@ -845,26 +902,18 @@ async def deduct_karma(
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-register_activities_handlers(
-    dp=dp,
-    bot=bot,
-    main_reply_menu=main_reply_menu,
-    get_user_by_telegram_id=get_user_by_telegram_id,
-    grant_activity_once=grant_activity_once,
-)
 register_quiz_handlers(
     dp=dp,
-    main_reply_menu=main_reply_menu,
+    main_nav_markup=main_reply_menu,
     get_user_by_telegram_id=get_user_by_telegram_id,
     grant_activity_once=grant_activity_once,
     activity_quiz_reward=ACTIVITY_QUIZ_REWARD,
 )
 register_questions_handlers(
     dp=dp,
-    main_reply_menu=main_reply_menu,
+    main_nav_markup=main_reply_menu,
     get_user_by_telegram_id=get_user_by_telegram_id,
-    get_questions_count_for_user=get_open_mic_questions_count_for_user,
-    create_question=create_open_mic_question,
+    open_mic_form_url=OPEN_MIC_FORM_URL,
 )
 register_admin_handlers(
     dp=dp,
@@ -898,6 +947,7 @@ async def start(message: Message, state: FSMContext) -> None:
     user = await get_user_by_telegram_id(from_user.id)
 
     if user:
+        await state.clear()
         await message.answer(
             f"Привет, {user['name']}!\n\n"
             f"Номер браслета: {user['badge_id']} (назови его при оплате мерча)\n"
@@ -1010,7 +1060,7 @@ async def onboarding_karma(callback: CallbackQuery) -> None:
         await cb_msg.answer(
             f"{user['name']}, приветственные баллы уже начислялись.\n\n"
             f"{balance_line}"
-            "Открывай главное меню кнопкой «Меню» ниже.",
+            "Открывай главное меню кнопками внизу чата.",
             reply_markup=main_reply_menu(),
         )
         await callback.answer()
@@ -1027,79 +1077,95 @@ async def onboarding_karma(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@dp.message(F.text == "Меню")
-async def menu_button(message: Message, state: FSMContext) -> None:
+async def answer_balance_for_telegram_user(answer_to: Message, *, telegram_id: int) -> None:
+    user = await get_user_by_telegram_id(telegram_id)
+    if not user:
+        await answer_to.answer("Сначала нажми /start и зарегистрируйся.")
+        return
+    await answer_to.answer_photo(
+        FSInputFile(str(BALANCE_PHOTO_PATH)),
+        caption=f"На твоём балансе сейчас: {user['balance']} баллов кармы {BALANCE_FIRE_HTML}",
+        parse_mode="HTML",
+        reply_markup=main_reply_menu(),
+    )
+
+
+@dp.message(F.text == CLIENT_NAV_BALANCE)
+async def nav_balance(message: Message, state: FSMContext) -> None:
+    if message.from_user is None:
+        return
     await state.clear()
-    user = await get_user_by_telegram_id(message.from_user.id) if message.from_user else None
-    if user:
-        await message.answer(
-            f"{user['name']}, ты в главном меню. Выбери раздел ниже.",
-            reply_markup=main_reply_menu(),
-        )
-    else:
-        await message.answer(
-            "Главное меню. Чтобы продолжить, нажми /start.",
-            reply_markup=main_reply_menu(),
-        )
+    await answer_balance_for_telegram_user(message, telegram_id=message.from_user.id)
 
 
-@dp.message(F.text == "Мой баланс")
-async def my_balance(message: Message) -> None:
-    from_user = message.from_user
-    if from_user is None:
+@dp.message(F.text == CLIENT_NAV_SPEND)
+async def balance_spend(message: Message, state: FSMContext) -> None:
+    if message.from_user is None:
         return
-    user = await get_user_by_telegram_id(from_user.id)
+    await state.clear()
+    user = await get_user_by_telegram_id(message.from_user.id)
     if not user:
         await message.answer("Сначала нажми /start и зарегистрируйся.")
         return
-
-    await message.answer_photo(FSInputFile(str(BALANCE_PHOTO_PATH)))
     await message.answer(
-        f"На твоём балансе сейчас: {user['balance']} баллов кармы.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="Меню", callback_data="nav:menu"),
-                    InlineKeyboardButton(text="Списать карму", callback_data="bal:spend"),
-                ]
-            ]
-        ),
-    )
-
-
-@dp.callback_query(F.data == "bal:spend")
-async def balance_spend_inline(callback: CallbackQuery) -> None:
-    cb_msg = callback.message
-    if not isinstance(cb_msg, Message):
-        await callback.answer()
-        return
-    user = await get_user_by_telegram_id(callback.from_user.id)
-    if not user:
-        await callback.answer()
-        return
-    await cb_msg.answer(
-        "Чтобы списать карму, назови номер с браслета (4 цифры).\n\n"
-        f"Твой номер: {user['badge_id']}",
+        f"{MERCH_SHOP_GIFT_HTML} Назови свой ID сотруднику в магазине — и обменяй карму на мерч\n\n"
+        f"Твой ID: {user['badge_id']}",
+        parse_mode="HTML",
         reply_markup=main_reply_menu(),
     )
-    await callback.answer()
 
 
-@dp.message(F.text == "Списать карму")
-async def spend_karma(message: Message) -> None:
-    from_user = message.from_user
-    if from_user is None:
+@dp.message(F.text == CLIENT_NAV_OFFICE_MAP)
+async def nav_office_map(message: Message, state: FSMContext) -> None:
+    if message.from_user is None:
         return
-    user = await get_user_by_telegram_id(from_user.id)
+    await state.clear()
+    user = await get_user_by_telegram_id(message.from_user.id)
     if not user:
         await message.answer("Сначала нажми /start и зарегистрируйся.")
         return
-
-    await message.answer(
-        "Чтобы списать карму, назови номер с браслета (4 цифры).\n\n"
-        f"Твой номер: {user['badge_id']}",
+    if not OFFICE_MAP_PHOTO_PATH.exists():
+        await message.answer(
+            "Карта офиса пока не подключена. Подойди к организатору мероприятия.",
+            reply_markup=main_reply_menu(),
+        )
+        return
+    await message.answer_photo(
+        FSInputFile(str(OFFICE_MAP_PHOTO_PATH)),
+        caption="Лови карту офиса — чтобы не потеряться!",
         reply_markup=main_reply_menu(),
     )
+
+
+@dp.message(F.text == CLIENT_NAV_DEMO_PROGRAM)
+async def nav_demo_program(message: Message, state: FSMContext) -> None:
+    if message.from_user is None:
+        return
+    await state.clear()
+    user = await get_user_by_telegram_id(message.from_user.id)
+    if not user:
+        await message.answer("Сначала нажми /start и зарегистрируйся.")
+        return
+    await message.answer(
+        demo_day_program_html(),
+        parse_mode="HTML",
+        reply_markup=main_reply_menu(),
+    )
+
+
+register_activities_handlers(
+    dp=dp,
+    bot=bot,
+    main_nav_markup=main_reply_menu,
+    get_user_by_telegram_id=get_user_by_telegram_id,
+    grant_activity_once=grant_activity_once,
+)
+
+
+@dp.startup()
+async def _ensure_db_schema_on_startup(**_: Any) -> None:
+    """Схема БД до первого апдейта (актуально после ручного удаления bot.db и др.)."""
+    await init_db()
 
 
 async def main() -> None:
